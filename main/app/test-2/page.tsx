@@ -1,32 +1,69 @@
 "use client";
 
-import React, { useState } from "react";
-import { useSignMessage, useAccount } from "wagmi";
+import React, { useState, useEffect } from "react";
+import { useSignMessage, useAccount, useWalletClient, useChainId } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { PushAPI, CONSTANTS } from "@pushprotocol/restapi";
-import { ethers } from "ethers";
 
-export default function useSignMessageHook() {
+// Channel address for different networks
+const CHANNEL_ADDRESSES = {
+    SEPOLIA: "0xF5E93e4eEDbb1235B0FB200fd77068Cb9938eF4f",
+    BASE_SEPOLIA: "0xF5E93e4eEDbb1235B0FB200fd77068Cb9938eF4f", // Replace with your Base Sepolia channel address
+};
+
+export default function UseSignMessageHook() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState(false);
+    const [pushUser, setPushUser] = useState<any>(null);
     const { address } = useAccount();
     const { signMessageAsync } = useSignMessage();
+    const { data: walletClient } = useWalletClient();
+    const chainId = useChainId();
 
+    // Function to get the correct channel address based on the network
+    const getChannelAddress = () => {
+        if (chainId === 11155111) {
+            return CHANNEL_ADDRESSES.SEPOLIA;
+        } else if (chainId === 84532) {
+            return CHANNEL_ADDRESSES.BASE_SEPOLIA;
+        }
+        throw new Error("Unsupported network. Please connect to Sepolia or Base Sepolia.");
+    };
+
+    // Reinitialize Push SDK on wallet or chain switch
+    useEffect(() => {
+        if (walletClient && chainId) {
+            PushAPI.initialize(walletClient, {
+                env: CONSTANTS.ENV.STAGING, // Ensure correct environment
+            })
+                .then((user) => {
+                    console.log("Push User reinitialized for chainId:", chainId);
+                    setPushUser(user);
+                })
+                .catch((err) => {
+                    console.error("Error reinitializing Push User:", err);
+                });
+        }
+    }, [walletClient, chainId]);
+
+    // Trigger notification process
     async function triggerNotification() {
         try {
             setLoading(true);
 
-            // Step 1: Sign the message
-            const response = await signMessageAsync({ message: 'hello world' });
-            console.log("Signed message response:", response);
-
-            if (!address) {
-                throw new Error("Address not available");
+            if (!address || !walletClient) {
+                throw new Error("Please connect your wallet first");
             }
 
-            // Step 2: Generate QR code URL using a public QR code service
-            const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(address)}`;
+            // Step 1: Sign the message
+            const response = await signMessageAsync({ message: "hello world" });
+            console.log("Signed message response:", response);
+
+            // Step 2: Generate QR code URL
+            const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(
+                address
+            )}`;
 
             // Step 3: Send the notification
             await sendNotification(qrCodeUrl);
@@ -39,32 +76,38 @@ export default function useSignMessageHook() {
         }
     }
 
+    // Send notification
     async function sendNotification(qrCodeUrl: string) {
         try {
-            const signer = new ethers.Wallet(process.env.NEXT_PUBLIC_PVT_KEY as string);
+            if (!pushUser) {
+                throw new Error("Push User not initialized");
+            }
 
-            const user = await PushAPI.initialize(signer, {
-                env: CONSTANTS.ENV.STAGING,
-            });
+            if (!chainId) {
+                throw new Error("No chain selected");
+            }
 
-            // await user.channel.create({
-            //     name: 'Test Channel',
-            //     description: 'Test Description',
-            //     icon: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAz0lEQVR4AcXBsU0EQQyG0e+saWJ7oACiKYDMEZVs6GgSpC2BIhzRwAS0sgk9HKn3gpFOAv3v3V4/3+4U4Z1q5KTy42Ql940qvFONnFSGmCFmiN2+fj7uCBlihpgh1ngwcvKfwjuVIWaIGWKNB+GdauSk8uNkJfeNKryzYogZYoZY40m5b/wlQ8wQM8TayMlKeKcaOVkJ71QjJyuGmCFmiDUe+HFy4VyEd57hx0mV+0ZliBlihlgL71w4FyMnVXhnZeSkiu93qheuDDFDzBD7BcCyMAOfy204AAAAAElFTkSuQmCC',
-            //     url: 'https://push.org',
-            // });
+            console.log(`Active chainId: ${chainId}`); // Debugging step
 
-            // Send the notification with the QR code URL
-            await user.channel.send([address as string], {
+            const channelAddress = getChannelAddress();
+            const subscriptionString = `eip155:${chainId}:${channelAddress}`;
+
+            console.log("Subscribing to:", subscriptionString);
+
+            // Subscribe to the channel
+            await pushUser.notification.subscribe(subscriptionString);
+
+            // Send the notification
+            await pushUser.channel.send([address as string], {
                 notification: {
                     title: "Your Public Key QR Code",
-                    body: "Scan the QR code to access your public key."
+                    body: "Scan the QR code to access your public key.",
                 },
                 payload: {
                     title: "Your Public Key QR Code",
                     body: "Scan the QR code to access your public key.",
-                    cta: '',
-                    embed: qrCodeUrl // Use the QR code service URL
+                    cta: "",
+                    embed: qrCodeUrl,
                 },
             });
 
@@ -76,13 +119,33 @@ export default function useSignMessageHook() {
         }
     }
 
+    // Get network status message
+    const getNetworkMessage = () => {
+        if (!chainId) return "Please connect your wallet";
+        if (chainId !== 11155111 && chainId !== 84532) {
+            return "Please switch to Sepolia or Base Sepolia network";
+        }
+        return null;
+    };
+
+    const networkMessage = getNetworkMessage();
+
     return (
         <div className="container">
             <ConnectButton />
-            <button onClick={triggerNotification} className="sign-button" disabled={loading}>
+            {networkMessage && (
+                <p className="text-yellow-500 mt-2">{networkMessage}</p>
+            )}
+            <button
+                onClick={triggerNotification}
+                className="sign-button"
+                disabled={loading || !address || !!networkMessage}
+            >
                 {loading ? "Signing..." : "Sign message"}
             </button>
-            {success && <p className="text-green-500 mt-2">Notification sent successfully!</p>}
+            {success && (
+                <p className="text-green-500 mt-2">Notification sent successfully!</p>
+            )}
             {error && <p className="text-red-500 mt-2">{error}</p>}
         </div>
     );
